@@ -67,6 +67,8 @@
   .btn:disabled{opacity:.6}
   .btn.ghost{background:var(--bg2);color:var(--text);margin-top:10px}
 
+  .form-error{background:#fdecea;color:#a12a1f;border-radius:12px;padding:10px 12px;font-size:14px;margin-bottom:10px;white-space:pre-line}
+  .form-error[hidden]{display:none}
   /* Успех */
   .done{text-align:center;padding-top:20vh}
   .done .icon{font-size:64px}
@@ -127,7 +129,7 @@
     <label>Как узнали о Нине?</label>
     <input name="source" placeholder="Instagram, друзья, чат…">
   </form>
-  <div class="bar"><button class="btn" id="btn-send">Отправить анкету</button></div>
+  <div class="bar"><div class="form-error" id="form-error" hidden></div><button class="btn" id="btn-send" type="button">Отправить анкету</button></div>
 </section>
 
 <!-- ЭКРАН 3: Готово -->
@@ -179,50 +181,57 @@ try { tg && tg.BackButton && tg.BackButton.onClick(() => show("s-profile")); } c
 document.querySelectorAll(".chip").forEach(c => c.onclick = () => c.classList.toggle("on"));
 
 // Отправка
+function showErr(msg){ const b=$("form-error"); b.textContent=msg; b.hidden=!msg; }
+function haptic(t){ try{ tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(t); }catch(e){} }
+
 $("btn-send").onclick = async () => {
-  const f = $("form");
-  const req = ["name","phone"];
-  let ok = true;
-  req.forEach(n => {
-    const el = f.elements[n];
-    const bad = n === "phone" ? el.value.replace(/\D/g,"").length < 7 : !el.value.trim();
-    el.classList.toggle("invalid", bad);
-    if (bad) ok = false;
-  });
-  if (!ok) { tg?.HapticFeedback?.notificationOccurred("error"); return; }
-
-  const data = {
-    name: f.elements.name.value.trim(),
-    phone: f.elements.phone.value.trim(),
-    area: f.elements.area.value,
-    interest: [...document.querySelectorAll('#interest .chip.on')].map(c => c.textContent).join(", "),
-    request: f.elements.request.value.trim(),
-    time: [...document.querySelectorAll('.chips[data-name="time"] .chip.on')].map(c => c.textContent).join(", "),
-    source: f.elements.source.value.trim(),
-    initData: tg?.initData || ""
-  };
-
+  showErr("");
   const btn = $("btn-send");
-  btn.disabled = true; btn.textContent = "Отправляем…";
   try {
-    if (!tg?.initData) throw new Error("NO_TG");
-    const r = await fetch(CONFIG.apiUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(data) });
+    const f = $("form");
+    let ok = true;
+    ["name","phone"].forEach(n => {
+      const el = f.elements[n];
+      const bad = n === "phone" ? el.value.replace(/\D/g,"").length < 7 : !el.value.trim();
+      el.classList.toggle("invalid", bad);
+      if (bad) ok = false;
+    });
+    if (!ok) { haptic("error"); showErr("Заполните имя и телефон (они отмечены красным)."); return; }
+
+    const data = {
+      name: f.elements.name.value.trim(),
+      phone: f.elements.phone.value.trim(),
+      area: f.elements.area.value,
+      interest: [...document.querySelectorAll('#interest .chip.on')].map(c => c.textContent).join(", "),
+      request: f.elements.request.value.trim(),
+      time: [...document.querySelectorAll('.chips[data-name="time"] .chip.on')].map(c => c.textContent).join(", "),
+      source: f.elements.source.value.trim(),
+      initData: (tg && tg.initData) || ""
+    };
+    if (!data.initData) throw new Error("NO_TG");
+
+    btn.disabled = true; btn.textContent = "Отправляем…";
+    const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 15000);
+    let r;
+    try { r = await fetch(CONFIG.apiUrl, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(data), signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
     if (!r.ok) throw new Error(r.status + " " + (await r.text()).slice(0, 200));
-    tg?.HapticFeedback?.notificationOccurred("success");
+    haptic("success");
     show("s-done");
   } catch (e) {
     console.error(e);
-    tg?.HapticFeedback?.notificationOccurred("error");
-    const m = String(e.message || e);
+    haptic("error");
+    const m = String((e && e.message) || e);
     const why =
-      m === "NO_TG" ? "Приложение открыто не в Telegram. Откройте его по ссылке t.me/… или кнопкой в боте." :
-      m.startsWith("404") ? "Сервер не найден (404): функция отправки не задеплоена. Сайт нужно заливать через GitHub/CLI, а не перетаскиванием." :
-      m.startsWith("500") ? "На сервере не заданы BOT_TOKEN / NINA_CHAT_ID (Netlify → Environment variables → Redeploy)." :
-      m.startsWith("401") ? "Проверка Telegram не прошла: BOT_TOKEN в Netlify не от того бота, к которому привязан миниапп." :
-      m.startsWith("502") && /chat not found|blocked|Forbidden/i.test(m) ? "Бот не может написать Нине: она должна открыть бота и нажать Start, и проверьте NINA_CHAT_ID." :
-      m.startsWith("502") && /Unauthorized/i.test(m) ? "Неверный BOT_TOKEN в Netlify." :
+      m === "NO_TG" ? "Приложение открыто не в Telegram. Откройте его по ссылке t.me/… в Telegram." :
+      /abort/i.test(m) ? "Сервер не ответил за 15 секунд. Проверьте интернет и попробуйте ещё раз." :
+      m.startsWith("404") ? "Код 404: функция отправки не задеплоена (в Netlify нет netlify/functions/send.js)." :
+      m.startsWith("500") ? "Код 500: в Netlify не заданы BOT_TOKEN / NINA_CHAT_ID или после их добавления не было Deploy." :
+      m.startsWith("401") ? "Код 401: BOT_TOKEN в Netlify не от того бота, к которому привязан миниапп." :
+      m.startsWith("502") && /chat not found|blocked|Forbidden/i.test(m) ? "Код 502: бот не может написать получателю — он должен нажать Start в боте, проверьте NINA_CHAT_ID." :
+      m.startsWith("502") && /Unauthorized/i.test(m) ? "Код 502: неверный BOT_TOKEN в Netlify." :
       "Ошибка: " + m;
-    (tg?.showAlert ? tg.showAlert.bind(tg) : alert)("Не получилось отправить.\n\n" + why);
+    showErr("Не получилось отправить.\n" + why);
   } finally {
     btn.disabled = false; btn.textContent = "Отправить анкету";
   }
